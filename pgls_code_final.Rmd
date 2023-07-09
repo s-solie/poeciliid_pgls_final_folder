@@ -1,0 +1,1497 @@
+---
+title: "poeciliid_pgls"
+author: "Sarah Solie"
+date: "2023-07-07"
+output: html_document
+---
+
+```{r packages, eval = FALSE, include = FALSE}
+
+#install required packages
+install.packages("tidyverse")
+install.packages("smatr")
+install.packages("plyr")
+install.package("lme4")
+install.packages("nlme")
+install.packages("phangorn")
+install.packages("ape", dependencies = T)
+install.packages("evobiR")
+install.packages("geiger")
+install.packages("picante")
+install.packages("caper")
+install.packages("phytools")
+install.packages("phylotools")
+install.packages("plotly")
+install.packages("knitr")
+install.packages("gridExtra")
+install.packages("ggimage")
+install.packages("grid")
+install.packages("gtable")
+install.packages("cowplot")
+install.packages("mvmorph")
+install.packages("kableExtra")
+install.packages("mvMORPH")
+install.packages("TreeTools")
+install.packages("bbmle")
+install.packages("phyr")
+install.packages("gt")
+install.packages("webshot2")
+install.packages("r2glmm")
+#install ggtree package from Bioconductor
+if (!requireNamespace("BiocManager", quietly = TRUE))
+    install.packages("BiocManager")
+BiocManager::install("ggtree") 
+#install evomap package from github
+install_github("JeroenSmaers/evomap")
+
+```
+
+#Load package libraries
+```{r setup, include = FALSE}
+
+library(plyr)
+library(smatr)
+library(picante)
+library(nlme)
+library(gt)
+library(lme4)
+library(ape)
+library(r2glmm)
+library(bbmle)
+library(evobiR)
+library(geiger)
+library(caper)
+library(phytools)
+library(phangorn)
+library(phylotools)
+library(plotly)
+library(kableExtra)
+library(gridExtra)
+library(ggimage)
+library(ggtree)
+library(grid)
+library(gtable)
+library(cowplot)
+library(knitr)
+library(mvMORPH)
+library(tidyverse)
+library(TreeTools)
+library(evomap)
+library(patchwork)
+library(phyr)
+library(webshot2)
+# Markdown settings
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE, fig.height = 4.5, fig.width=8)
+```
+
+##Directory and data
+```{r}
+#set wd
+setwd("/Users/sarah31821/Documents/projects/manuscripts/pgls_ms")
+#Import morphological and sexual selection df
+morpho <- read.csv("data/pgls_data.csv")
+
+pgls <- morpho %>% 
+  mutate_if(is.character, as.factor) %>% 
+  mutate_if(is.integer, as.factor) %>% 
+  mutate(genus_species = paste(genus, species, sep = "_")) %>%
+  mutate(eyemean = rowMeans(morpho[c('eed_left', 'eed_right')], na.rm=TRUE)) %>% #adds mean of L/R eyes
+  mutate(lensmean = rowMeans(morpho[c('lens_dia_left', 'lens_dia_right')], na.rm=TRUE)) %>%  #adds mean of L/R lenses
+  mutate(releye = eyemean/sl) %>% 
+  mutate(rellens = lensmean/sl) %>% 
+  group_by(genus, species) %>% 
+  mutate(count = n()) 
+
+#Import list of species to remove and substitute in Reznick tree
+changes <- data.frame(read.csv("data/rez_subs.csv", header=TRUE)) %>% 
+  mutate_all(na_if,"")
+drops <-na.omit(as.character(changes$exclude)) #create vector of taxa to drop from tree
+subs <- na.omit(changes[ , c("tips_original", "tips_sub")]) 
+
+#create a dataframe with column 1 with all original tip labels, and column 2 with corresponding desired tip labels
+subs2 <- subs %>% 
+  rename(genus_species = tips_sub) %>% 
+  rename(rez_tiplabel = tips_original)
+  
+pgls_f1 <- left_join(pgls, subs2) 
+
+```
+
+#Make summary data table for supplement
+```{r}
+#get summary statistics
+summ_stats <- ddply(pgls_f1, "genus_species", summarise,
+                 N = length(eyemean),
+                 mean_ed = round(mean(eyemean), digits=2),
+                 sd_ed = round(sd(eyemean), digits=2),
+                 se_ed = round(sd_ed /sqrt(N), digits=2),
+                 mean_sl = round(mean(sl), digits=2),
+                 sd_sl = round(sd(sl), digits=2),
+                 se_sl = round(sd_sl /sqrt(N), digits=2)) %>% 
+  mutate(genus_species = str_replace(genus_species, "_", " "))
+
+#make a pretty table
+gt_summ <- gt(summ_stats) %>% 
+  tab_header(title = "Species summaries for sampled museum specimens") %>% 
+  tab_spanner(label = "Eye diameter (mm)", columns = c(mean_ed, sd_ed, se_ed)) %>% 
+  tab_spanner(label = "Standard Length (mm)", columns = c(mean_sl, sd_sl, se_sl)) %>% 
+  cols_label(genus_species = "Species",
+             mean_ed = "Mean",
+             sd_ed = "SD",
+             se_ed = "SE",
+             mean_sl = "Mean",
+             sd_sl = "SD", 
+             se_sl = "SE") 
+#save file
+#gt_summ %>% 
+  #gtsave("figs/supp_table_7.5.23.docx")
+```
+
+##Phylogeny
+Download and prune Reznick timetree
+```{r data-phylogeny, fig.height=15, fig.width=10}
+#Import full 293 species tree from  Reznick et al. (2017) downloaded from supplement
+tree_orig <- read.tree(file = "data/reznick_tt_indrates.txt")
+#Drop species not included (as matches or substitutions) in our study
+tree_pruned <- drop.tip(phy = tree_orig, tip = drops, trim.internal = TRUE) 
+#Make substitutions of species on tips based on our sampling
+tree_pruned$tip.label <- subs[[2]][match(tree_pruned$tip.label, subs[[1]])]
+tree_pruned<-drop.tip(tree_pruned, tree_pruned$tip.label[na.omit(tree_pruned$tip.label)]) #removes NA tip.labels
+
+#Test whether tree is ultrametric (it should be)
+is.ultrametric(tree_pruned)
+#Make this tree ultrametric
+tree_pruned <- nnls.tree(cophenetic(tree_pruned),tree_pruned,rooted=TRUE)
+is.ultrametric(tree_pruned)
+
+#ladderize tree
+fish.tree <- ladderize(tree_pruned)
+#check tree
+is.rooted(fish.tree) #tests whether tree is rooted 
+is.binary(fish.tree) #tests whether tree is dichotomous (no polytomies)
+#make dichotomous
+fish.tree <- multi2di(fish.tree)
+
+#Plot tree 
+plot.phylo(fish.tree, 
+           type = "phylogram", 
+           show.tip.label = TRUE,
+           cex = 1, #text size
+           no.margin = TRUE, 
+           use.edge.length = TRUE,
+           edge.width = 1,
+           label.offset = .02)
+```
+
+## Supplementary figure for sampled genera within Poeciliid phylogeny
+```{r}
+#read in vector of outgroup taxa to drop from tree
+outgroup <- read.csv("data/outgroup_taxa.csv") 
+drops2 <- na.omit(as.character(outgroup$x))
+#drop outgroup taxa
+tree_orig <- drop.tip(phy = tree_orig, tip = drops2, trim.internal = TRUE)
+
+#make df for relevant tip info
+full_poec <- as.data.frame(tree_orig$tip.label) %>% 
+  rename("tip.label" = "tree_orig$tip.label")
+d <- pgls %>% 
+  dplyr::select(genus_species, ssi, count) %>% 
+  rename("tip.label" = "genus_species") %>% 
+  mutate(plot_count = as.factor(cut(count, breaks = c(0,30,50), labels = F))) %>%
+  unique()
+df_tip_data <- full_join(full_poec, d, by = 'tip.label')
+
+#make manual color and size keys
+col_ssi <- c("0" = "#b6cfe3",
+             "1" = "#8592C6",
+             "2" = "#435E98", 
+             "3" = "#092F5C",
+             "NA" = "#dce0e3")
+
+point_size <- c("1" = 3,
+                "2" = 6)
+
+supp_tree <- ggtree(tree_orig, layout="circular") %<+% df_tip_data +
+  geom_tiplab(aes(angle=angle), size = 3, offset = 0.03) +
+  geom_tippoint(aes(color = ssi, size = plot_count), position = position_nudge(0.008)) +
+  scale_color_manual(name = "Sexual selection index", values = col_ssi) +
+  scale_size_manual(name = "Sample size", values = point_size) +
+  theme(legend.text = element_text(face = "italic", size = 12),
+        legend.position = "right")
+
+#save tree to pdf
+# pdf("figs/supp_tree_7.5.23.pdf", width=12, height=11)
+# plot(supp_tree)
+# dev.off()
+
+```
+
+# Interspecific allometry
+## Species means for morphological comparisons
+We then found species means for eye diameter and standard length 
+```{r species-av}
+## SPECIES AVERAGES (median 10 specimens per species) FOR VARIOUS COMPARISONS
+##### eye diameter vs. standard length #####
+# Take mean of replicate specimens for each species (and remove specimens with missing data for two traits of interest)
+av.edsl <- pgls_f1 %>% 
+  mutate_if(is.integer, as.factor) %>% 
+  filter(!(is.na(eyemean) | is.na(sl))) %>% 
+  group_by(genus_species) %>%
+  summarise(eye_av = mean(eyemean), sl_av = mean(sl), n = n())
+
+## Merge data means with other column info
+av.edsl <- merge(av.edsl, pgls_f1[match(unique(pgls_f1$genus_species), pgls_f1$genus_species), ], by="genus_species", all.x = TRUE, all.y = FALSE)
+
+#Keep averages and associated traits only
+av.edsl <- av.edsl %>% 
+  select(genus_species, eye_av, sl_av, rez_tiplabel, n, ssi, court, dichrom, ornament, ss) 
+```
+
+#PGLS by morphological variables
+###PGLS for log eye diameter vs. log standard length (all)
+Indicates (a possibly) moderate influence of phylogeny on relationship between eye size and standard length
+```{r pgls-edsl}
+#fit PGLS model for log eye diameter vs. log sl using 'caper' package
+#### check for best model of correlation structure ####
+
+#Make list of taxa to drop (in tree but not in dataset) 
+drops <- (setdiff(fish.tree$tip.label, as.character(av.edsl$genus_species)))
+
+#Drop unwanted tips from phylogeny
+tree.edit <- drop.tip(phy = fish.tree, tip = drops) 
+rownames(av.edsl) <- av.edsl$genus_species
+
+#Reorder species data to match phylogeny order
+dat <-ReorderData(tree.edit, av.edsl, taxa.names="genus_species")
+
+#test whether BM or OU model is better fit for PGLS using the nlme package and AIC comparison
+
+#Expected covariance under a pure Brownian model (Felsenstein 1985,	Martins and Hansen 1997)
+pglsBM <- gls(log10(eye_av) ~ log10(sl_av), cor = corBrownian(phy = tree.edit, form = ~genus_species), data = dat, method = "ML")
+
+#Martins and Hansen's (1997) covariance structure (OU)
+pglsOU<-gls(log10(eye_av) ~ log10(sl_av), cor = corMartins(1, phy = tree.edit, form = ~genus_species, fixed = F), data = dat, method = "ML")
+
+#Pagel's “lambda” Correlation Structure: The correlation structure from the present model is derived from the Brownian motion model by multiplying the off-diagonal elements (i.e., the covariances) by lambda. The variances are thus the same than for a Brownian motion model.
+pglsPagel<-gls(log10(eye_av) ~ log10(sl_av), cor = corPagel(1, phy = tree.edit, fixed = F, form = ~genus_species), data = dat, method = "ML")
+anova(pglsBM, pglsOU, pglsPagel)
+
+#### prep data ####
+#check that names match in dataframe and tree
+name.check(phy = fish.tree, data = av.edsl, data.names = av.edsl$genus_species)
+  
+#use caper function to combine phylogeny and data into one object (this function also matches species names in tree and dataset)
+edsl.comp <- comparative.data(phy = fish.tree, data = av.edsl, 
+                            names.col = genus_species, vcv = TRUE, 
+                            na.omit = FALSE, warn.dropped = TRUE)
+
+#check for dropped tips or dropped species
+edsl.comp$dropped$tips #phylogeny
+edsl.comp$dropped$unmatched.rows #dataset
+
+#### run PGLS model ####
+#for log eye diameter vs. log sl using the Maximum Liklihood estimate of lambda
+pgls_edsl <- pgls(log10(eye_av) ~ log10(sl_av), 
+               data = edsl.comp, 
+               lambda = "ML", #uses Maximum Liklihood estimate of lambda
+               param.CI = 0.95)
+
+#### check model assumptions ####
+#diagnostic plots
+par(mar = c(4,4,2,2))
+par(mfrow = c(2, 2))
+plot(pgls_edsl, main = "PGLS model for mean eye diameter vs. sl")
+par(mfrow = c(1, 1))
+
+#### model outputs ####
+#print model output 
+summary(pgls_edsl)
+
+#quick plot of pgls
+plot(log10(eye_av) ~ log10(sl_av), data = av.edsl)
+abline(pgls_edsl)
+
+#Likelihood plot for Pagel's lambda from the PGLS model of eye diameter vs. standard length. Solid red line indicates estimate for lambda and broken red lines indcaite the 95% confidence interval
+lambda.edsl <- pgls.profile(pgls_edsl, "lambda")
+plot(lambda.edsl)
+
+#no outliers
+```
+# Scaling via OLS and SMA for comparison
+We also fit OLS and SMA models to our data for comparison. 
+```{r ols-sma}
+##### eye diameter vs. standard length #####
+
+# OLS fit of eye diameter vs. sl
+ols_edsl_av <- lm(formula = log10(eye_av) ~ log10(sl_av),
+                   data = av.edsl)
+
+# plot fit, residuals, qq
+par(mfrow = c(2,2)) #makes your plot window into 2x2 panels
+plot(ols_edsl_av)
+par(mfrow = c(1,1)) #set plotting window back to one plot
+
+#model summary
+summary(ols_edsl_av)
+
+# SMA fit of eye diameter vs. sl
+sma_edsl_av <- sma(formula = eye_av ~ sl_av, 
+                    slope.test = 1, #tests for significant difference from isometry
+                    robust = TRUE, #makes estimation robust to outliers
+                    data = av.edsl, 
+                    log = "xy",
+                    method = "SMA", 
+                    alpha= 0.05)
+
+# plot SMA fit, residuals, qq
+par(mfrow = c(2,2)) #makes your plot window into 2x2 panels
+plot(sma_edsl_av, main = "eye ~ sl")
+plot(sma_edsl_av, which = "residual") #check assumptions of linearity and equal variance at all fitted values
+plot(sma_edsl_av, which = "qq") #check assumption of normally distributed residuals
+par(mfrow = c(1,1)) #set plotting window back to one plot
+# model summary
+summary(sma_edsl_av)
+```
+
+We then plotted the data (species averages) and PGLS fits (with OLS and SMA fits for comparison). This plot is included in the main text as Figure 1. 
+
+```{r pgls-plots, fig.height=3, fig.width=6}
+#define a colorblind-friendly vector of colors for sexual selection designation
+col_ss <- c("0" = "#FFC20A",
+              "1" = "#0C7BDC",
+              "NA" = "#999999")
+
+shape_ss <- c("0" = 16, 
+              "1" = 17, 
+              "NA" = 3)
+
+#### plot for eye diameter vs. sl ####
+plot_pgls.edsl <- ggplot(av.edsl, aes(x = sl_av, y = eye_av, text = genus_species)) +
+  geom_point(aes(color = ss, pch = ss), size = 2) +
+  scale_color_manual(limits=c(1,0,"NA"), name = "Visual signaling (presence/absence)", labels = c("0", "1", "NA"), values = col_ss) +
+  scale_shape_manual(name = "Visual signaling (presence/absence)", limits=c(1,0,"NA"), labels = c("0", "1", "NA"), values = shape_ss) +
+  scale_y_log10(name = "Eye diameter (mm)") +
+  scale_x_log10(name = "Standard length (mm)") +
+  theme_classic() +
+  geom_abline(slope = coef(pgls_edsl)[[2]], intercept = coef(pgls_edsl)[[1]], linetype = "solid") + #plots PGLS fit with solid line
+ geom_abline(slope = coef(sma_edsl_av)[[2]], intercept = coef(sma_edsl_av)[[1]], linetype = "dotted") + #plots SMA fit with dotted line
+   geom_abline(slope = coef(ols_edsl_av)[[2]], intercept = coef(ols_edsl_av)[[1]], linetype = "dashed")  #plots OLS fit with dashed line 
+
+na.ss <- filter(av.edsl, is.na(ss)) #separates NA ss vals for inclusion in figure
+
+figure1 <- plot(plot_pgls.edsl) +
+  geom_point(data = na.ss, aes(x = sl_av, y = eye_av), color = "#999999", pch = 3, size = 2) +
+  theme(legend.position = "bottom")
+
+
+#pdf("figs/reg_compare_6.16.23.pdf", width=6, height=3)
+#plot(figure1)
+#dev.off()
+```
+
+# Relative eye size and eye investment in Poeciliidae
+To investigate how relative eye size differed across species with different ecological traits, we looked at the residuals from PGLS fits of eye diameter vs. body size. 
+
+First, we added residuals of PGLS fits to our datasets by species. 
+```{r pgls-residuals}
+#Add residuals from PGLS fits to dataframes
+
+#Residuals for PGLS of eye diameter ~ sl ------------
+#extract pgls residuals
+pglsres.edsl <- residuals(pgls_edsl) 
+#name residuals
+colnames(pglsres.edsl) <- "pglsres.edsl"
+#add rownames to original dataframe
+rownames(av.edsl) <- av.edsl$genus_species 
+#merge residuals with original data by rowname
+av.edsl.phy <- merge(av.edsl, pglsres.edsl, by = "row.names") 
+```
+
+# Phylogenetic distribution of absolute and relative eye size
+We then plotted absolute eye size and relative eye investment (represented by the residual of the eye size vs. body size PGLS) onto the poeciliid phylogeny. Bars are colored based on the presence/absence of visual signals 
+
+### phylogeny for sexually selected visual signals (presence/absence)
+```{r plot-phytools, fig.height = 10, fig.width = 8}
+# color vectors -------
+#custom color palette 
+#create vector of colors for sexual selection index
+col_ssi <- c("0" = "grey75",
+             "1" = "#8592C6",
+             "2" = "#435E98", 
+             "3" = "#092F5C",
+             na.value = "grey75")
+# create vector of colors for courtship
+col_court <- c("0" = "grey75", 
+         "1" = "#84251E", 
+         'NA' = "grey75")
+# create vector of colors for dichromatism
+col_dichrom <- c("0" = "grey75", 
+         "1" = "#61366E", 
+         'NA' = "grey75")
+# create vector of colors for ornamentation
+col_ornament <- c("0" = "grey75", 
+         "1" = "#13530C",
+         'NA' = "grey75")
+# create vector of colors for visual signals (presence/absence)
+col_ss <- c("0" = "grey75", 
+         "1" = "#E7B316",
+         'NA' = "grey75")
+
+# Prep data and phylogeny -----
+#subset data for eye diameter and sl
+edsl.bars <- av.edsl.phy %>%
+  mutate(oldtip = rez_tiplabel, 
+         newtip = genus_species, 
+         abseye = eye_av, 
+         inveye = pglsres.edsl) %>%
+  select(oldtip, newtip, abseye, inveye, ss)
+
+# set row names in dataset to match the tip labels in the tree
+row.names(edsl.bars) <- edsl.bars$newtip
+
+#drop phylogeny tips not in dataset)
+tree_edsl <- drop.tip(fish.tree, fish.tree$tip.label[!(fish.tree$tip.label %in% edsl.bars$newtip)])
+
+#ladderize tree
+tree_edsl <- ladderize(tree_edsl)
+
+#add tip label names to vector
+names(aveye) <- edsl.bars$newtip 
+
+#make trait vector for eye investment (PGLS residuals)
+inv.eye <- as.vector(edsl.bars$inveye) #residuals of pgls
+names(inv.eye) <- edsl.bars$newtip
+
+#make trait vector of sexual ss visual signals
+ss.edsl <- as.vector(edsl.bars$ss) 
+
+```
+
+#Main text figure 2
+This figures plots the phylogeny with visual signaling parameters indicated by colored blocks and eye investment as bar lengths colored by presence/absence of sexually selected visual signals.
+```{r plot-phytools, fig.height = 10, fig.width = 8}
+#Make a phylogeny with bar lengths indicating eye investment (residuals of pgls predictions of eye size for a given standard body length) and tip colors denoting sexually selected visual signals
+
+tipcols.ssi <- unname(col_ssi[ssi.edsl]) 
+tipcols.dichrom <- unname(col_dichrom[dichrom.edsl]) 
+tipcols.court <- unname(col_court[court.edsl]) 
+tipcols.ornament <- unname(col_ornament[ornament.edsl])
+tipcols.ss <- unname(col_ss[ss.edsl]) 
+
+#Make phlogeny figure and export as pdf
+#pdf(file = "figs/ss_inv.pdf", height=20, width=8)
+plotTree.wBars(tree_edsl, inv.eye, 
+               scale = 0.7, 
+               tip.labels = TRUE, offset = 2,
+               col = tipcols.ss,
+               plot = TRUE, 
+               add = TRUE)
+tiplabels(pch = 15, col = tipcols.dichrom, bg = tipcols.dichrom, cex = 1.5, offset = 0.005)
+tiplabels(pch = 15, col = tipcols.court, bg = tipcols.dichrom, cex = 1.5, offset = 0.0225)
+tiplabels(pch = 15, col = tipcols.ornament, bg = tipcols.dichrom, cex = 1.5, offset = 0.04)
+#dev.off()
+
+#nb: the final figure was polished in Illustrator
+
+```
+## Eye size and investment across ecological variables 
+We compared the distribution of absolute and phylogenetically corrected relative eye sizes across states for each of the visual signaling traits we examined. 
+
+```{r trait-stats-dataframe}
+#Combine results from assessments of eye v. sl for stats (get all the pgls residuals from the various comparisons into the same dataframe)
+edsl.sub <- av.edsl.phy %>%
+  select(genus_species, eye_av, pglsres.edsl)
+
+traits <- pgls_f1 %>% 
+  dplyr::select(genus_species, rez_tiplabel, ssi, ss, dichrom, court, ornament)
+
+all.res.traits <- edsl.sub %>%
+  left_join(traits, by = "genus_species")
+```
+
+
+We made boxplots to show how eye size and investment varied across states for each sexually selected visual signaling trait.
+```{r}
+#boxplot of eye size by sexual selection index
+ssi.abs <- ggplot(data = filter(all.res.traits, !is.na(ssi) & !is.na(eye_av)), 
+                  aes(x = ssi, 
+                      y = eye_av)) +
+  geom_boxplot(notch = FALSE, outlier.shape = NA) +
+  stat_summary(fun = mean, colour="black", geom="point", 
+               shape=18, size=3, show.legend = FALSE) +
+  geom_jitter(aes(color = ssi, text = genus_species), shape = 19, size = 1.3, alpha = 0.8, position = position_jitter(0.15)) +
+  scale_color_manual(values = col_ssi) +
+  theme(text = element_text(size=14), panel.background = element_blank(), axis.line = element_line(colour = "black"))+
+  theme(axis.text = element_text(angle = 0, size = 9)) +
+  scale_x_discrete(breaks=c("0","1","2", "3")) +
+  ylab("Eye diameter (mm)") +
+  xlab("Sexual selection index") +
+  theme(legend.position = "none")
+
+#boxplot of eye investment (sl) by sexual selection index
+#boxplot of eye investment (residuals of Eye diameter v. standard length PGLS) by sexual selection index
+ssi.res.sl <- ggplot(data = filter(all.res.traits, !is.na(ssi) & !is.na(pglsres.edsl)), 
+              aes(x = ssi, y = pglsres.edsl)) +
+  geom_boxplot(notch = FALSE, outlier.shape = NA) +
+  stat_summary(fun = mean, colour="black", geom="point", 
+               shape=18, size=3, show.legend = FALSE) +
+  geom_jitter(aes(color = ssi, text = genus_species), shape = 19, size = 1.3, alpha = 0.8, position = position_jitter(0.15)) +
+  scale_color_manual(values = col_ssi, name = "Sexual selection index") +
+  theme(text = element_text(size=14), panel.background = element_blank(), axis.line = element_line(colour = "black")) +
+  theme(axis.text = element_text(angle = 0, size = 9)) +
+ scale_x_discrete(breaks=c("0","1","2", "3")) +
+  scale_y_continuous(breaks = c(log10(0.75), log10(0.9), 0, log10(1.1), log10(1.2), log10(1.3)),
+                     labels = c("0.75x", "0.9x", "1x", "1.1x", "1.2x", "1.3x")) +
+  ylab("Eye investment") +
+  xlab("Sexual selection index") +
+  theme(legend.position = "none")
+
+
+##Boxplots of eye size by sexual dichromatism
+dichrom.abs <- ggplot(data = filter(all.res.traits, !is.na(dichrom) & !is.na(eye_av)), 
+                  aes(x = reorder(dichrom, eye_av, FUN=mean), 
+                      y = eye_av)) +
+  geom_boxplot(notch = FALSE, outlier.shape = NA) +
+  stat_summary(fun = mean, colour="black", geom="point", 
+               shape=18, size=3, show.legend = FALSE) +
+  geom_jitter(aes(color = dichrom, text = genus_species), shape = 19, size = 1.3, alpha = 0.8, position = position_jitter(0.15)) +
+  scale_color_manual(values = col_dichrom) +
+  theme(text = element_text(size=14), panel.background = element_blank(), axis.line = element_line(colour = "black"))+
+  theme(axis.text = element_text(angle = 0, size = 9)) +
+  scale_x_discrete(breaks=c("0","1","2","3")) +
+  ylab("Eye diameter (mm)") +
+  xlab("Sexual dichromatism") +
+  theme(legend.position = "none")
+
+#boxplot of eye investment (sl) by sexual dichromatism
+#boxplot of eye investment (residuals of Eye diameter v. standard length PGLS) by sexual dichromatism
+dichrom.res.sl <- ggplot(data = filter(all.res.traits, !is.na(dichrom) & !is.na(pglsres.edsl)), 
+              aes(x = reorder(dichrom, pglsres.edsl, FUN = mean), y = pglsres.edsl)) +
+  geom_boxplot(notch = FALSE, outlier.shape = NA) +
+  stat_summary(fun = mean, colour="black", geom="point", 
+               shape=18, size=3, show.legend = FALSE) +
+  geom_jitter(aes(color = dichrom, text = genus_species), shape = 19, size = 1.3, alpha = 0.8, position = position_jitter(0.15)) +
+  scale_color_manual(values = col_dichrom, name = "Sexual dichromatism") +
+  theme(text = element_text(size=14), panel.background = element_blank(), axis.line = element_line(colour = "black")) +
+  theme(axis.text = element_text(angle = 0, size = 9)) +
+ scale_x_discrete(breaks=c("0","1")) +
+  scale_y_continuous(breaks = c(log10(0.75), log10(0.9), 0, log10(1.1), log10(1.2), log10(1.3)),
+                     labels = c("0.75x", "0.9x", "1x", "1.1x", "1.2x", "1.3x")) +
+  ylab("Eye investment") +
+  xlab("Sexual dichromatism") +
+  theme(legend.position = "none")
+
+
+##boxplots of eye size by courtship
+court.abs <- ggplot(data = filter(all.res.traits, !is.na(court) & !is.na(eye_av)), 
+                  aes(x = reorder(court, eye_av, FUN=mean), 
+                      y = eye_av)) +
+  geom_boxplot(notch = FALSE, outlier.shape = NA) +
+  stat_summary(fun = mean, colour="black", geom="point", 
+               shape=18, size=3, show.legend = FALSE) +
+  geom_jitter(aes(color = court, text = genus_species), shape = 19, size = 1.3, alpha = 0.8, position = position_jitter(0.15)) +
+  scale_color_manual(values = col_court) +
+  theme(text = element_text(size=14), panel.background = element_blank(), axis.line = element_line(colour = "black"))+
+  theme(axis.text = element_text(angle = 0, size = 9)) +
+  scale_x_discrete(breaks=c("0","1")) +
+  ylab("Eye diameter (mm)") +
+  xlab("Sexual courtship") +
+  theme(legend.position = "none")
+
+#boxplot of eye investment (sl) by courtship
+#boxplot of eye investment (residuals of Eye diameter v. standard length PGLS) by courtship
+court.res.sl <- ggplot(data = filter(all.res.traits, !is.na(court) & !is.na(pglsres.edsl)), 
+              aes(x = reorder(court, pglsres.edsl, FUN = mean), y = pglsres.edsl)) +
+  geom_boxplot(notch = FALSE, outlier.shape = NA) +
+  stat_summary(fun = mean, colour="black", geom="point", 
+               shape=18, size=3, show.legend = FALSE) +
+  geom_jitter(aes(color = court, text = genus_species), shape = 19, size = 1.3, alpha = 0.8, position = position_jitter(0.15)) +
+  scale_color_manual(values = col_court, name = "Sexual courtship") +
+  theme(text = element_text(size=14), panel.background = element_blank(), axis.line = element_line(colour = "black")) +
+  theme(axis.text = element_text(angle = 0, size = 9)) +
+ scale_x_discrete(breaks=c("0","1")) +
+  scale_y_continuous(breaks = c(log10(0.75), log10(0.9), 0, log10(1.1), log10(1.2), log10(1.3)),
+                     labels = c("0.75x", "0.9x", "1x", "1.1x", "1.2x", "1.3x")) +
+  ylab("Eye investment") +
+  xlab("Sexual courtship") +
+  theme(legend.position = "none")
+
+##boxplots of eye size by ornamentation
+ornament.abs <- ggplot(data = filter(all.res.traits, !is.na(ornament) & !is.na(eye_av)), 
+                  aes(x = reorder(ornament, eye_av, FUN=mean), 
+                      y = eye_av)) +
+  geom_boxplot(notch = FALSE, outlier.shape = NA) +
+  stat_summary(fun = mean, colour="black", geom="point", 
+               shape=18, size=3, show.legend = FALSE) +
+  geom_jitter(aes(color = ornament, text = genus_species), shape = 19, size = 1.3, alpha = 0.8, position = position_jitter(0.15)) +
+  scale_color_manual(values = col_ornament) +
+  theme(text = element_text(size=14), panel.background = element_blank(), axis.line = element_line(colour = "black"))+
+  theme(axis.text = element_text(angle = 0, size = 9)) +
+  scale_x_discrete(breaks=c("0","1")) +
+  ylab("Eye diameter (mm)") +
+  xlab("Sexual ornamentation") +
+  theme(legend.position = "none")
+
+#boxplot of eye investment (sl) by ornamentation
+#boxplot of eye investment (residuals of Eye diameter v. standard length PGLS) by ornamentation
+ornament.res.sl <- ggplot(data = filter(all.res.traits, !is.na(ornament) & !is.na(pglsres.edsl)), 
+              aes(x = reorder(ornament, pglsres.edsl, FUN = mean), y = pglsres.edsl)) +
+  geom_boxplot(notch = FALSE, outlier.shape = NA) +
+  stat_summary(fun = mean, colour="black", geom="point", 
+               shape=18, size=3, show.legend = FALSE) +
+  geom_jitter(aes(color = ornament, text = genus_species), shape = 19, size = 1.3, alpha = 0.8, position = position_jitter(0.15)) +
+  scale_color_manual(values = col_ornament, name = "Sexual ornamentation") +
+  theme(text = element_text(size=14), panel.background = element_blank(), axis.line = element_line(colour = "black")) +
+  theme(axis.text = element_text(angle = 0, size = 9)) +
+ scale_x_discrete(breaks=c("0","1")) +
+  scale_y_continuous(breaks = c(log10(0.75), log10(0.9), 0, log10(1.1), log10(1.2), log10(1.3)),
+                     labels = c("0.75x", "0.9x", "1x", "1.1x", "1.2x", "1.3x")) +
+  ylab("Eye investment") +
+  xlab("Sexual ornamentation") +
+  theme(legend.position = "none")
+
+##boxplots of eye size by ss traits (presence/absence)
+ss.abs <- ggplot(data = filter(all.res.traits, !is.na(ss) & !is.na(eye_av)), 
+                  aes(x = reorder(ss, eye_av, FUN=mean), 
+                      y = eye_av)) +
+  geom_boxplot(notch = FALSE, outlier.shape = NA) +
+  stat_summary(fun = mean, colour="black", geom="point", 
+               shape=18, size=3, show.legend = FALSE) +
+  geom_jitter(aes(color = ss, text = genus_species), shape = 19, size = 1.3, alpha = 0.8, position = position_jitter(0.15)) +
+  scale_color_manual(values = col_ss) +
+  theme(text = element_text(size=14), panel.background = element_blank(), axis.line = element_line(colour = "black"))+
+  theme(axis.text = element_text(angle = 0, size = 9)) +
+  scale_x_discrete(breaks=c("0","1")) +
+  ylab("Eye diameter (mm)") +
+  xlab(none) +
+  theme(legend.position = "none")
+
+#boxplot of eye investment (sl) by ss traits (presence/absence)
+#boxplot of eye investment (residuals of Eye diameter v. standard length PGLS) by ss traits (presence/absence)
+ss.res.sl <- ggplot(data = filter(all.res.traits, !is.na(ss) & !is.na(pglsres.edsl)), 
+              aes(x = reorder(ss, pglsres.edsl, FUN = mean), y = pglsres.edsl)) +
+  geom_boxplot(notch = FALSE, outlier.shape = NA) +
+  stat_summary(fun = mean, colour="black", geom="point", 
+               shape=18, size=3, show.legend = FALSE) +
+  geom_jitter(aes(color = ss, text = genus_species), shape = 19, size = 1.3, alpha = 0.8, position = position_jitter(0.15)) +
+  scale_color_manual(values = col_ss, name = "Sexually selected traits") +
+  theme(text = element_text(size=14), panel.background = element_blank(), axis.line = element_line(colour = "black")) +
+  theme(axis.text = element_text(angle = 0, size = 9)) +
+ scale_x_discrete(breaks=c("0","1")) +
+  scale_y_continuous(breaks = c(log10(0.75), log10(0.9), 0, log10(1.1), log10(1.2), log10(1.3)),
+                     labels = c("0.75x", "0.9x", "1x", "1.1x", "1.2x", "1.3x")) +
+  ylab("Eye investment") +
+  xlab("Sexually selected traits") +
+  theme(legend.position = "none")
+```
+
+####Boxplots
+```{r interactive-boxplots, eval = FALSE}
+ggplotly(ssi.abs)
+ggplotly(ssi.res.sl)
+ggplotly(dichrom.abs)
+ggplotly(dichrom.res.sl)
+ggplotly(court.abs)
+ggplotly(court.res.sl)
+ggplotly(ornament.abs)
+ggplotly(ornament.res.sl)
+ggplotly(ss.abs)
+ggplotly(ss.res.sl)
+
+box.a <- ssi.abs +
+  theme(legend.position = "none") +
+  xlab(NULL)
+box.b <- ss.abs +
+  theme(legend.position = "none") +
+  xlab(NULL) +
+  ylab(NULL)
+box.c <- dichrom.abs +
+  theme(legend.position = "none") +
+  xlab(NULL) +
+  ylab(NULL)
+box.d <- court.abs +
+  theme(legend.position = "none") +
+  xlab(NULL) +
+  ylab(NULL)
+box.e <- ornament.abs +
+  theme(legend.position = "none") +
+  xlab(NULL) +
+  ylab(NULL)
+box.f <- ssi.res.sl +
+  theme(legend.position = "none")
+box.g <- ss.res.sl +
+  theme(legend.position = "none") +
+  ylab(NULL)
+box.h <- dichrom.res.sl +
+  theme(legend.position = "none") +
+  ylab(NULL)
+box.i <- court.res.sl +
+  theme(legend.position = "none") +
+  ylab(NULL)
+box.j <- ornament.res.sl +
+  theme(legend.position = "none") +
+  ylab(NULL)
+
+#plot the graphs together with a shared common legend.
+boxplots <- plot_grid(box.a, box.b, box.c, box.d, box.e, box.f, box.g, box.h, box.i, box.j, #list of plots to arrange in grid
+           align = 'vh', #align horizontally and vertically
+           labels = c("A", "B", "C", "D", "E", "F", "G", "H", "I", "J"), #panel labels for figure
+           hjust = -4.5, #adjustment for panel labels
+           nrow = 2) #number of columns in grids
+#construct full figure with panels and legend
+bplot <- plot_grid(boxplots, nrow=2, rel_heights = c(1, 0.1), align = 'vh')
+
+#export to pdf
+#pdf(file = "figs/boxplots.pdf", bplot)
+#dev.off()
+```
+
+## Testing for differences in eye size across ecological states
+Data for eye size and eye investment across ecological groups were not normally distributed (checked 5.31 -- eye size is not normally distributed, eye investment IS, but results of parametric tests are essential the same as nonparametric tests), so we used non-parametric statistical tests for comparing our data between ecological groups.
+
+#### Sexual selection index
+No significant differences in eye size or investment detected across ssi groups
+```{r trait-stats-sexual selection index}
+#Sexual selection index
+# Dataframe with just ssi, eye size, residuals, with "Unknown" observations removed
+ssi.df <- all.res.traits %>% 
+  select(rez_tiplabel, ssi, eye_av, pglsres.edsl) %>% 
+  mutate(ssi = as.factor(ssi)) %>%
+  filter(ssi != "NA")
+#Summary stats
+ssi.stats <- ddply(ssi.df, ~ssi, summarise, 
+                   mean.eye=mean(eye_av, na.rm = TRUE), 
+                   sd.eye=sd(eye_av, na.rm = TRUE), 
+                   n.eye=length(eye_av[!is.na(eye_av)]), 
+                   mean.edsl=mean(pglsres.edsl, na.rm = TRUE),
+                   sd.edsl=sd(pglsres.edsl, na.rm = TRUE),
+                  n.edsl=length(pglsres.edsl[!is.na(pglsres.edsl)])) 
+                  
+print(ssi.stats)
+
+# Test for differences in mean (absolute) eye size across ssi groups: Kruskal-Wallis test
+kruskal.test(eye_av ~ ssi, data = ssi.df) 
+
+# Mulitple comparisons for differences in mean (absolute) eye size across ssi groups: Pairwise Wilcoxon rank sum tests
+pairwise.wilcox.test(ssi.df$eye_av, ssi.df$ssi, p.adjust.method = "bonferroni")
+
+# Test for differences relative eye size (by sl) across ssi groups: Kruskal-Wallis test
+kruskal.test(pglsres.edsl ~ ssi, data = ssi.df) 
+
+# Mulitple comparisons for differences in eye investment (sl) across ssi groups: Pairwise Wilcoxon rank sum tests
+pairwise.wilcox.test(ssi.df$pglsres.edsl, ssi.df$ssi, p.adjust.method = "bonferroni")
+```
+
+#### Dichromatism
+Kruskall-Wallis indicates a significant difference in eye investment (p = 0.03266) between species with and without sexual dichromatism. Species with sexual dichromatism have larger eyes relative to body size compared to species without dichromatism
+```{r trait-stats-sexdichrom}
+#Sexual dichromatism
+# Dataframe with just sex dichromatism, eye size, residuals, with "Unknown" observations removed
+dichrom.df <- all.res.traits %>% 
+  select(rez_tiplabel, dichrom, eye_av, pglsres.edsl) %>% 
+  mutate(dichrom = as.factor(dichrom)) %>%
+  filter(dichrom != "NA")
+
+#Summary stats
+dichrom.stats <- ddply(dichrom.df, ~dichrom, summarise,
+                   mean.eye=mean(eye_av, na.rm = TRUE), 
+                   sd.eye=sd(eye_av, na.rm = TRUE), 
+                   n.eye=length(eye_av[!is.na(eye_av)]), 
+                   mean.edsl=mean(pglsres.edsl, na.rm = TRUE),
+                   sd.edsl=sd(pglsres.edsl, na.rm = TRUE),
+                   n.edsl=length(pglsres.edsl[!is.na(pglsres.edsl)])) 
+                   
+print(dichrom.stats)
+
+# Test for differences in mean (absolute) eye size across sex dichromatism  groups: Kruskal-Wallis test
+kruskal.test(eye_av ~ dichrom, data = dichrom.df) 
+
+# Test for differences in eye investment (by sl) across sex dichromatism: Kruskal-Wallis test
+kruskal.test(pglsres.edsl ~ dichrom, data = dichrom.df)  
+ 
+```
+
+####Courtship
+no significant differences
+```{r}
+#Sexual courtship
+# Dataframe with just sex courtship, eye size, residuals, with "Unknown" observations removed
+court.df <- all.res.traits %>% 
+  select(rez_tiplabel, court, eye_av, pglsres.edsl) %>% 
+  mutate(court = as.factor(court)) %>%
+  filter(court != "NA")
+#Summary stats
+court.stats <- ddply(court.df, ~court, summarise,
+                   mean.eye=mean(eye_av, na.rm = TRUE), 
+                   sd.eye=sd(eye_av, na.rm = TRUE), 
+                   n.eye=length(eye_av[!is.na(eye_av)]), 
+                   mean.edsl=mean(pglsres.edsl, na.rm = TRUE),
+                   sd.edsl=sd(pglsres.edsl, na.rm = TRUE),
+                   n.edsl=length(pglsres.edsl[!is.na(pglsres.edsl)]))
+            
+print(court.stats)
+# Test for differences in mean (absolute) eye size across sex courtship  groups: Kruskal-Wallis test
+kruskal.test(eye_av ~ court, data = court.df) 
+
+# Test for differences in eye investment (by sl) across sex courtship: Kruskal-Wallis test
+kruskal.test(pglsres.edsl ~ court, data = court.df)  
+```
+
+#### Ornamentation
+Kruskall-Wallis test indicates that species with sexually-dimorphic ornamentation have larger average eye sizes compared to those without ornamentation (p = 0.0484). (Though no difference in eye investment)
+```{r}
+#Sexual ornamentation
+# Dataframe with just sex ornamentation, eye size, residuals, with "Unknown" observations removed
+ornament.df <- all.res.traits %>% 
+  select(rez_tiplabel, ornament, eye_av, pglsres.edsl) %>% 
+  mutate(ornament = as.factor(ornament)) %>%
+  filter(ornament != "NA")
+#Summary stats
+ornament.stats <- ddply(ornament.df, ~ornament, summarise,
+                   mean.eye=mean(eye_av, na.rm = TRUE), 
+                   sd.eye=sd(eye_av, na.rm = TRUE), 
+                   n.eye=length(eye_av[!is.na(eye_av)]), 
+                   mean.edsl=mean(pglsres.edsl, na.rm = TRUE),
+                   sd.edsl=sd(pglsres.edsl, na.rm = TRUE),
+                   n.edsl=length(pglsres.edsl[!is.na(pglsres.edsl)]))
+print(ornament.stats)
+
+# Test for differences in mean (absolute) eye size across sex ornamentation  groups: Kruskal-Wallis test
+kruskal.test(eye_av ~ ornament, data = ornament.df) 
+
+# Test for differences in eye investment (by sl) across sex ornamentation: Kruskal-Wallis test
+kruskal.test(pglsres.edsl ~ ornament, data = ornament.df)  
+```
+
+#### Sexually selected visual signaling (presence/absence)
+Kruskall-wallis test indicates that species with sexually selected visual signaling exhibit greater investment in eye size (relative to eye size) compared to species with no documented sexually selected visual signaling (p = 0.03078).
+```{r}
+#Sexually selected visual signaling
+# Dataframe with just ss, eye size, residuals, with "Unknown" observations removed
+ss.df <- all.res.traits %>% 
+  select(rez_tiplabel, ss, eye_av, pglsres.edsl) %>% 
+  mutate(ss = as.factor(ss)) %>%
+  filter(ss != "NA")
+#Summary stats
+ss.stats <- ddply(ss.df, ~ss, summarise,
+                   mean.eye=mean(eye_av, na.rm = TRUE), 
+                   sd.eye=sd(eye_av, na.rm = TRUE), 
+                   n.eye=length(eye_av[!is.na(eye_av)]), 
+                   mean.edsl=mean(pglsres.edsl, na.rm = TRUE),
+                   sd.edsl=sd(pglsres.edsl, na.rm = TRUE),
+                   n.edsl=length(pglsres.edsl[!is.na(pglsres.edsl)]))
+print(ss.stats)
+
+# Test for differences in mean (absolute) eye size across sexual selection  groups: Kruskal-Wallis test
+kruskal.test(eye_av ~ ss, data = ss.df) 
+
+# Test for differences in eye investment (by sl) across sexual selection groups: Kruskal-Wallis test
+kruskal.test(pglsres.edsl ~ ss, data = ss.df)  
+```
+
+# Testing for ecological correlates of eye size across the phylogeny
+## PGLS of eye scaling with standard length with ecological factors as covariates
+These plots show the overall pgls regressions for each phylogenetically controlled scaling relationship by breeding ecology variable as well as species averages colored by breeding ecology classification
+
+### Sexual selection index as covariate
+
+```{r pgls-ssi}
+#remove rows from averaged dataframe not in phylogeny
+av.edsl.ssi <- av.edsl %>%
+  drop_na(genus_species) %>%
+  drop_na(ssi) %>% 
+  drop_na(eye_av)
+rownames(av.edsl.ssi) <- av.edsl.ssi$genus_species
+
+#Make list of taxa to drop (in tree but not in dataset) 
+drops <- (setdiff(fish.tree$tip.label, as.character(av.edsl.ssi$genus_species)))
+
+#Drop unwanted tips from phylogeny
+tree.edit <- drop.tip(phy = fish.tree, tip = drops) 
+
+#Reorder species data to match phylogeny order
+dat <-ReorderData(tree.edit, av.edsl.ssi, taxa.names="row names")
+
+#check that names match in dataframe and tree
+name.check(phy = tree.edit, data = av.edsl.ssi)
+
+# Run ML lambda model in caper ----
+#use caper function to combine phylogeny and data into one object (this function also matches species names in tree and dataset)
+edsl.ssi.comp <- comparative.data(phy = fish.tree, data = av.edsl.ssi, names.col = genus_species, vcv = TRUE, na.omit = FALSE, warn.dropped = TRUE)
+
+#check for dropped tips or dropped species
+edsl.ssi.comp$dropped$tips #phylogeny
+edsl.ssi.comp$dropped$unmatched.rows #dataset
+
+#run PGLS model for eye diameter vs. standard length using the Maximum Liklihood estimate of lambda
+pgls_ssi <- pgls(log10(eye_av) ~ log10(sl_av) * ssi, 
+               data = edsl.ssi.comp, 
+               lambda = "ML", bounds = list(lambda = c(1e-05, 1)),
+               #uses Maximum Liklihood estimate of lambda
+               param.CI = 0.95)
+
+#evaluate model assumptions
+par(mfrow = c(2,2)) #makes your plot window into 2x2 panels
+plot(pgls_ssi) #plot the linear model
+par(mfrow = c(1,1)) #set plotting window back to one plot
+#significance of relationships
+kable(anova(pgls_ssi), digits = 3, caption= "ANOVA Table for eye size ~ sl * ssi") %>%
+  kable_styling(full_width = F) %>%
+  collapse_rows(columns = 1, valign = "top")
+
+#intercept and slope
+summary(pgls_ssi)
+```
+
+### Sexual dichromatism as covariate
+dichromatism has a significant effect on eye diameter (p = 0.043) (but no interaction between body size and dichrom)
+```{r pgls-sexdich}
+#remove rows from averaged dataframe not in phylogeny
+av.edsl.dichrom <- av.edsl %>%
+  drop_na(genus_species) %>%
+  drop_na(dichrom)
+rownames(av.edsl.dichrom) <- av.edsl.dichrom$genus_species
+
+#Make list of taxa to drop (in tree but not in dataset) 
+drops <- (setdiff(fish.tree$tip.label, as.character(av.edsl.dichrom$genus_species)))
+
+#Drop unwanted tips from phylogeny
+tree.edit <- drop.tip(phy = fish.tree, tip = drops) 
+
+#Reorder species data to match phylogeny order
+dat <-ReorderData(tree.edit, av.edsl.dichrom, taxa.names="row names")
+
+#check that names match in dataframe and tree
+name.check(phy = tree.edit, data = av.edsl.dichrom)
+
+# Run ML lambda model in caper ----
+#use caper function to combine phylogeny and data into one object 
+edsl.dichrom.comp <- comparative.data(phy = fish.tree, data = av.edsl.dichrom, names.col = genus_species, vcv = TRUE, na.omit = FALSE, warn.dropped = TRUE)
+
+#check for dropped tips or dropped species
+edsl.dichrom.comp$dropped$tips #phylogeny
+edsl.dichrom.comp$dropped$unmatched.rows #dataset
+
+#run PGLS model for eye diameter vs. standard length using the Maximum Liklihood estimate of lambda
+pgls_dichrom <- pgls(log10(eye_av) ~ log10(sl_av) * dichrom, 
+               data = edsl.dichrom.comp, 
+               lambda = "ML", bounds = list(lambda = c(1e-05, 1)),
+               #uses Maximum Liklihood estimate of lambda
+               param.CI = 0.95)
+
+#evaluate model assumptions
+par(mfrow = c(2,2)) #makes your plot window into 2x2 panels
+plot(pgls_dichrom) #plot the linear model
+par(mfrow = c(1,1)) #set plotting window back to one plot
+
+#significance of relationships
+kable(anova(pgls_dichrom), digits = 3, caption= "ANOVA Table for eye size ~ sl * dichrom") %>%
+  kable_styling(full_width = F) %>%
+  collapse_rows(columns = 1, valign = "top")
+
+#intercept and slope
+summary(pgls_dichrom)
+```
+
+###Courtship as covariate
+```{r pgls-court}
+# Check for best model of correlation structure ----
+#remove rows from averaged dataframe not in phylogeny
+av.edsl.court <- av.edsl %>%
+  drop_na(genus_species) %>%
+  drop_na(court)
+rownames(av.edsl.court) <- av.edsl.court$genus_species
+
+#Make list of taxa to drop (in tree but not in dataset) 
+drops <- (setdiff(fish.tree$tip.label, as.character(av.edsl.court$genus_species)))
+
+#Drop unwanted tips from phylogeny
+tree.edit <- drop.tip(phy = fish.tree, tip = drops) 
+
+#Reorder species data to match phylogeny order
+dat <-ReorderData(tree.edit, av.edsl.court, taxa.names="row names")
+
+#check that names match in dataframe and tree
+name.check(phy = tree.edit, data = av.edsl.court)
+
+# #test whether BM or OU model is better fit for PGLS using the nlme package and AIC comparison
+
+# Run ML lambda model in caper ----
+#use caper function to combine phylogeny and data into one object (this function also matches species names in tree and dataset)
+edsl.court.comp <- comparative.data(phy = fish.tree, data = av.edsl.court, names.col = genus_species, vcv = TRUE, na.omit = FALSE, warn.dropped = TRUE)
+
+#check for dropped tips or dropped species
+edsl.court.comp$dropped$tips #phylogeny
+edsl.court.comp$dropped$unmatched.rows #dataset
+
+#run PGLS model for eye diameter vs. standard length using the Maximum Liklihood estimate of lambda
+pgls_court <- pgls(log10(eye_av) ~ log10(sl_av) * court, 
+               data = edsl.court.comp, 
+               lambda = "ML", bounds = list(lambda = c(1e-05, 1)),
+               #uses Maximum Liklihood estimate of lambda
+               param.CI = 0.95)
+
+#evaluate model assumptions
+par(mfrow = c(2,2)) #makes your plot window into 2x2 panels
+plot(pgls_court) #plot the linear model
+par(mfrow = c(1,1)) #set plotting window back to one plot
+
+#significance of relationships
+kable(anova(pgls_court), digits = 3, caption= "ANOVA Table for eye size ~ sl * court") %>%
+  kable_styling(full_width = F) %>%
+  collapse_rows(columns = 1, valign = "top")
+
+#intercept and slope
+summary(pgls_court)
+```
+
+###Ornamentation as covariate
+```{r pgls-ornament}
+# Check for best model of correlation structure ----
+#remove rows from averaged dataframe not in phylogeny
+av.edsl.ornament <- av.edsl %>%
+  drop_na(genus_species) %>%
+  drop_na(ornament)
+rownames(av.edsl.ornament) <- av.edsl.ornament$genus_species
+
+#Make list of taxa to drop (in tree but not in dataset) 
+drops <- (setdiff(fish.tree$tip.label, as.character(av.edsl.ornament$genus_species)))
+
+#Drop unwanted tips from phylogeny
+tree.edit <- drop.tip(phy = fish.tree, tip = drops) 
+
+#Reorder species data to match phylogeny order
+dat <-ReorderData(tree.edit, av.edsl.ornament, taxa.names="row names")
+
+#check that names match in dataframe and tree
+name.check(phy = tree.edit, data = av.edsl.ornament)
+
+# Run ML lambda model in caper ----
+#use caper function to combine phylogeny and data into one object (this function also matches species names in tree and dataset)
+edsl.ornament.comp <- comparative.data(phy = fish.tree, data = av.edsl.ornament, names.col = genus_species, vcv = TRUE, na.omit = FALSE, warn.dropped = TRUE)
+
+#check for dropped tips or dropped species
+edsl.ornament.comp$dropped$tips #phylogeny
+edsl.ornament.comp$dropped$unmatched.rows #dataset
+
+#run PGLS model for eye diameter vs. standard length using the Maximum Liklihood estimate of lambda
+pgls_ornament <- pgls(log10(eye_av) ~ log10(sl_av) * ornament, 
+               data = edsl.ornament.comp, 
+               lambda = "ML", bounds = list(lambda = c(1e-05, 1)),
+               #uses Maximum Liklihood estimate of lambda
+               param.CI = 0.95)
+
+#evaluate model assumptions
+par(mfrow = c(2,2)) #makes your plot window into 2x2 panels
+plot(pgls_ornament) #plot the linear model
+par(mfrow = c(1,1)) #set plotting window back to one plot
+
+#significance of relationships
+kable(anova(pgls_ornament), digits = 3, caption= "ANOVA Table for eye size ~ sl * ornament") %>%
+  kable_styling(full_width = F) %>%
+  collapse_rows(columns = 1, valign = "top")
+
+#intercept and slope
+summary(pgls_ornament)
+```
+
+###SS visual signaling as covariate
+presence of ss visual signal has significant effect on eye diameter (p = 0.032)
+```{r pgls-ss}
+# Check for best model of correlation structure ----
+#remove rows from averaged dataframe not in phylogeny
+av.edsl.ss <- av.edsl %>%
+  drop_na(genus_species) %>%
+  drop_na(ss)
+rownames(av.edsl.ss) <- av.edsl.ss$genus_species
+
+#Make list of taxa to drop (in tree but not in dataset) 
+drops <- (setdiff(fish.tree$tip.label, as.character(av.edsl.ss$genus_species)))
+
+#Drop unwanted tips from phylogeny
+tree.edit <- drop.tip(phy = fish.tree, tip = drops) 
+
+#Reorder species data to match phylogeny order
+dat <-ReorderData(tree.edit, av.edsl.ss, taxa.names="row names")
+
+#check that names match in dataframe and tree
+name.check(phy = tree.edit, data = av.edsl.ss)
+
+# Run ML lambda model in caper ----
+#use caper function to combine phylogeny and data into one object (this function also matches species names in tree and dataset)
+edsl.ss.comp <- comparative.data(phy = fish.tree, data = av.edsl.ss, names.col = genus_species, vcv = TRUE, na.omit = FALSE, warn.dropped = TRUE)
+
+#check for dropped tips or dropped species
+edsl.ss.comp$dropped$tips #phylogeny
+edsl.ss.comp$dropped$unmatched.rows #dataset
+
+#run PGLS model for eye diameter vs. standard length using the Maximum Liklihood estimate of lambda
+pgls_ss <- pgls(log10(eye_av) ~ log10(sl_av) * ss, 
+               data = edsl.ss.comp, 
+               lambda = "ML", bounds = list(lambda = c(1e-05, 1)),
+               #uses Maximum Liklihood estimate of lambda
+               param.CI = 0.95)
+
+#evaluate model assumptions
+par(mfrow = c(2,2)) #makes your plot window into 2x2 panels
+plot(pgls_ss) #plot the linear model
+par(mfrow = c(1,1)) #set plotting window back to one plot
+
+#significance of relationships
+kable(anova(pgls_ss), digits = 3, caption= "ANOVA Table for eye size ~ sl * ss") %>%
+  kable_styling(full_width = F) %>%
+  collapse_rows(columns = 1, valign = "top")
+
+#intercept and slope
+summary(pgls_ss)
+```
+
+
+###Model selection validation
+```{r}
+edsl.glmm <- merge(pglsres.edsl, av.edsl, by = "row.names") %>% 
+  rename(tip.label = Row.names) 
+
+edsl.allom <- left_join(pgls_f1, edsl.glmm) %>% 
+  select(genus_species, id, sex, sl, eyemean, lensmean, count, court, dichrom, ornament, ssi, ss, pglsres.edsl, tip.label) %>% 
+  group_by(genus_species, sex) %>% 
+  mutate(eye_sex = mean(eyemean)) %>% 
+  mutate(sl_sex = mean(sl)) %>% 
+  filter(count > 12)  
+
+mod.ssi <- glm(pglsres.edsl ~ ssi, data = edsl.glmm)
+mod.ss <- glm(pglsres.edsl ~ ss, data = edsl.glmm)
+mod.dco <- glm(pglsres.edsl ~ dichrom + court + ornament, data = edsl.glmm)
+mod.dc <- glm(pglsres.edsl ~ dichrom + court, data = edsl.glmm)
+mod.d <- glm(pglsres.edsl ~ dichrom, data = edsl.glmm)
+mod.co <- glm(pglsres.edsl ~ dichrom + ornament, data = edsl.glmm)
+res.comp <- list(mod.ssi, mod.ss, mod.dco, mod.dc, mod.d, mod.co)
+
+AICctab(res.comp, weights = TRUE, delta = TRUE, logLik = TRUE)
+
+#write function to calculate standardized regression coefs
+stdCoef.merMod <- function(object) {
+  sdy <- sd(getME(object,"y"))
+  sdx <- apply(getME(object,"X"), 2, sd)
+  sc <- fixef(object)*sdx/sdy
+  se.fixef <- coef(summary(object))[,"Std. Error"]
+  se <- se.fixef*sdx/sdy
+  return(data.frame(stdcoef=sc, stdse=se))
+}
+#get fixed effects estimates
+summary(mod.d)
+#get x2, pvals
+anova(mod.d)
+#get partial R2s
+r2beta(mod.d, partial = TRUE, method = "sgv")
+#get standardized coefs
+stdCoef.merMod(mod.d)
+```
+
+#PGLMM for eye-body allometries across poeciliidae
+```{r}
+#select only species with >12 individuals/sex
+edsl.allom <- left_join(pgls_f1, edsl.glmm) %>% 
+  select(genus_species, id, sex, sl, eyemean, lensmean, count, court, dichrom, ornament, ssi, ss, pglsres.edsl, tip.label) %>% 
+  group_by(genus_species, sex) %>% 
+  mutate(eye_sex = mean(eyemean)) %>% 
+  mutate(sl_sex = mean(sl)) %>% 
+  filter(count > 30)
+
+#define model set
+mod1 <- pglmm(log10(eyemean) ~ log10(sl) + sex + dichrom + court + ornament + (1 | tip.label__), data = edsl.allom, cov_ranef = list(tip.label = fish.tree))
+mod2 <- pglmm(log10(eyemean) ~ log10(sl)*sex + dichrom + (1 | tip.label__), data = edsl.allom, cov_ranef = list(tip.label = fish.tree))
+mod3 <- pglmm(log10(eyemean) ~ log10(sl)*sex + dichrom + court + (1 | tip.label__), data = edsl.allom, cov_ranef = list(tip.label = fish.tree))
+mod4 <- pglmm(log10(eyemean) ~ log10(sl) + sex + dichrom + (1 | tip.label__), data = edsl.allom, cov_ranef = list(tip.label = fish.tree))
+mod5 <- pglmm(log10(eyemean) ~ log10(sl) + sex + ssi + (1 | tip.label__), data = edsl.allom, cov_ranef = list(tip.label = fish.tree))
+mod6 <- pglmm(log10(eyemean) ~ log10(sl) + sex + ss + (1 | tip.label__), data = edsl.allom, cov_ranef = list(tip.label = fish.tree))
+mod7 <- pglmm(log10(eyemean) ~ log10(sl) + sex + (1 | tip.label__), data = edsl.allom, cov_ranef = list(tip.label = fish.tree))
+mod8 <- pglmm(log10(eyemean) ~ log10(sl)*sex + ss + (1 | tip.label__), data = edsl.allom, cov_ranef = list(tip.label = fish.tree))
+mod9 <- pglmm(log10(eyemean) ~ log10(sl) + (1 | tip.label__), data = edsl.allom, cov_ranef = list(tip.label = fish.tree))
+mod10 <- pglmm(log10(eyemean) ~ log10(sl)*sex + (1 | tip.label__), data = edsl.allom, cov_ranef = list(tip.label = fish.tree))
+mod11 <- pglmm(log10(eyemean) ~ log10(sl)*sex + dichrom + (1 | tip.label__), data = edsl.allom, cov_ranef = list(tip.label = fish.tree))
+mod.explore <- pglmm(log10(eyemean) ~ log10(sl) + dichrom + (1 | tip.label__), data = edsl.allom, cov_ranef = list(tip.label = fish.tree))
+
+top_mod <- pglmm(log10(eyemean) ~ log10(sl) + sex + (1 | tip.label__), data = edsl.allom, cov_ranef = list(tip.label = fish.tree))
+
+#get model stats
+#get fixed effects estimates
+summary(top_mod)
+#get x2, pvals
+anova(top_mod)
+#get partial R2s
+r2beta(top_mod, partial = TRUE, method = "sgv")
+#get standardized coefs
+stdCoef.merMod(top_mod)
+```
+
+# Static allometries
+```{r}
+#select only species with >12 individuals/sex
+data.allom <- left_join(pgls_f1, edsl.glmm) %>% 
+  select(genus_species, genus, species, id, sex, sl, eyemean, ssi, ss, count) %>%
+  group_by(genus_species, sex) %>% 
+  mutate(eye_sex = mean(eyemean)) %>% 
+  mutate(sl_sex = mean(sl)) %>% 
+  filter(count > 12) %>%
+  mutate(species_text = as.factor(paste(genus, species, sep = " "))) 
+
+#paste wasn't working on the xiphophorus species...
+xiphophorus_allom <- filter(data.allom, grepl('Xiph', genus_species)) %>% 
+  mutate(species_text = as.factor(paste(genus, species, sep = " ")))
+
+others <- filter(data.allom, !grepl('Xiph', genus_species))
+                        
+#Bind datasets and remove outliers
+edsl.allom <- rbind(others, xiphophorus_allom) %>%
+  filter(!id=="bel.bel.33") %>% 
+  filter(!id == "poe.pau.34")   
+```
+
+##Faceted SMA plot with all static allometry species
+```{r}
+sma_reg = sma(eyemean ~ sl * genus_species, 
+              data = edsl.allom,
+              log = "xy", #sets both x and y variables as logged
+              method="SMA", #defines SMA as model
+              alpha = 0.05)
+summary(sma_reg)
+sma_summary <- as.data.frame(coef(sma_reg)) %>% 
+    rownames_to_column('genus_species')
+  
+
+sma_fit <- ggplot(edsl.allom, aes(y = eyemean, x = sl, col = genus_species)) +
+  geom_point() +
+  geom_abline(data = sma_summary, aes(intercept = elevation, slope = slope), group = "genus_species") +
+  facet_wrap(~ genus_species, nrow = 4, ncol = 3) +
+  theme(strip.background = element_blank(), strip.text = element_text(face = 'bold', size = 12)) +
+  annotate("segment", x = -Inf, xend = Inf, y = -Inf, yend = -Inf, color = 'black', size = 1) +
+  scale_x_log10() + #makes x axis log scale 
+  scale_y_log10() + #makes y axis log scale
+  labs(x = "Standard Length", y = "Eye Diameter") +
+  theme_classic()
+ 
+sma_fit
+```
+
+# Test whether species differ in static allometry
+
+## Linear mixed model to test whether slopes vary across species
+### Fixed slope (variable intercepts) model
+```{r fixed-slope}
+# variable intercepts model (species can have different intercepts but share mean slope)
+lme_fixed <- lmer(log10(eyemean) ~ log10(sl) + (1|genus_species), 
+                  data = edsl.allom)
+
+# summary 
+summary(lme_fixed)
+# intercepts (variable) and slope (constant)
+coef(lme_fixed)
+# AIC
+AIC(lme_fixed)
+#fixed effects
+fixef(lme_fixed)
+#confidence intervals
+confint(lme_fixed, level = 0.95)
+```
+
+### Variable slopes model 
+```{r variable-slope}
+# variable slopes model (species can have different slopes/interaction effect between body size and species on eye size) -------
+lme_variable <- lmer(log10(eyemean) ~ log10(sl) + (1 + log10(sl) | genus_species), 
+                     data = edsl.allom)
+# summary
+summary(lme_variable)
+# intercepts (variable) and slope (constant)
+coef(lme_variable)
+# AIC
+AIC(lme_variable)
+#fixed effects
+fixef(lme_variable)
+#confidence intervals
+confint(lme_variable, level = 0.95)
+```
+
+### Compare models
+Then we can compare the two models via AIC and log likelihood. 
+```{r}
+#model AIC comparison
+AIC(lme_fixed, lme_variable)
+#log likelihood comparison
+anova(lme_fixed, lme_variable, refit=FALSE)
+```
+
+### Variable slopes model 
+```{r variable-slope}
+# variable slopes model (species can have different slopes/interaction effect between body size and species on eye size) -------
+lme_variable <- lmer(log10(eyemean) ~ log10(sl) + (1 + log10(sl) | genus_species), 
+                     data = edsl.allom)
+# summary
+summary(lme_variable)
+# intercepts (variable) and slope (constant)
+coef(lme_variable)
+# AIC
+AIC(lme_variable)
+#fixed effects
+fixef(lme_variable)
+#confidence intervals
+confint(lme_variable, level = 0.95)
+```
+
+### Compare models
+Then we can compare the two models via AIC and log likelihood.
+```{r}
+#model AIC comparison
+AIC(lme_fixed, lme_variable)
+#log likelihood comparison
+anova(lme_fixed, lme_variable, refit=FALSE)
+```
+
+## Test for significant effect of ssi as a covariate
+### Model without ssi
+```{r no-ssi}
+## variable intercepts model (species can have different intercepts but share mean slope) -------
+lme_no_ssi <- lmer(log10(eyemean) ~ log10(sl) + (1|genus_species), 
+                  data = edsl.allom,
+                  REML = FALSE) #uses ML instead of REML)
+
+# summary
+summary(lme_no_ssi)
+# intercepts (variable) and slope (constant)
+coef(lme_no_ssi)
+# AIC
+AIC(lme_no_ssi)
+#fixed effects
+fixef(lme_no_ssi)
+
+confint(lme_no_ssi, level = 0.95)
+```
+
+### Model including sexual selection index
+
+```{r with-pres}
+#reorder levels for ssi
+edsl.allom$ssi <- factor(edsl.allom$ssi, 
+                                      levels = c("0", "1", "2", "3"))
+## variable intercepts model (species can have different intercepts but share mean slope) -------
+lme_with_ssi <- lmer(log10(eyemean) ~ log10(sl) + ssi+ (1|genus_species), 
+                  data = edsl.allom,
+                  REML = FALSE) #uses ML instead of REML)
+
+
+# summary
+summary(lme_with_ssi)
+# AIC
+AIC(lme_with_ssi)
+#fixed effects
+fixef(lme_with_ssi)
+#confidence intervals
+confint(lme_with_ssi, level = 0.95)
+```
+
+### Model including sexual selection (presence/absence)
+
+```{r with-pres}
+#reorder levels for ss
+edsl.allom$ss <- factor(edsl.allom$ss, 
+                                      levels = c("0", "1"))
+## variable intercepts model (species can have different intercepts but share mean slope) -------
+lme_with_ss <- lmer(log10(eyemean) ~ log10(sl) + ss+ (1|genus_species), 
+                  data = edsl.allom,
+                  REML = FALSE) #uses ML instead of REML)
+
+
+# summary
+summary(lme_with_ss)
+# AIC
+AIC(lme_with_ss)
+#fixed effects
+fixef(lme_with_ss)
+#confidence intervals
+confint(lme_with_ss, level = 0.95)
+```
+
+### Compare models
+
+Then we can compare the three models via AIC and log likelihood.
+
+```{r}
+#model AIC comparison
+AIC(lme_no_ssi, lme_with_ssi, lme_with_ss)
+#log likelihood comparison
+anova(lme_no_ssi, lme_with_ssi, lme_with_ss)
+```
+
+#make a figure comparing allometric slopes, colored by species and with pch and lty designating ssi
+```{r species-fig, fig.width=9, fig.height=9}
+#make shape pallette
+lty.ssi <- c("0" = 3,
+             "1" = 4,
+             "2" = 2,
+             "3" = 1)
+                                                 
+#rainbow palette
+cols.sp <- c("Poecilia vivipara" = "#e36a64", 
+               "Limia nigrofasciata" = "#961e24",
+               "Poecilia latipinna" = "#fc0d0d",
+               "Poecilia orri" = "#f279ba",
+               "Girardinus metallicus" = "#edd70c", 
+               "Poeciliopsis paucimaculata" ="#f5cc9a",
+               "Xiphophorus hellerii" = "#027a06",
+               "Xiphophorus maculatus" = "springgreen2",
+               "Belonesox belizanus" = "deepskyblue1",
+               "Gambusia holbrooki" = "#b562fc",
+               "Gambusia affinis" = "darkslateblue",
+               "Gambusia vittata" = "#cba3d9")
+
+#sets limits by species for plots
+limits <- edsl.allom %>%
+  group_by(genus_species) %>%
+  summarise(max = max(sl, na.rm = TRUE),
+            min = min(sl, na.rm = TRUE))
+
+#combine SMA regression coefficients with species data limits
+reg_vars <- left_join(limits, sma_summary, by = "genus_species")
+#add reg vars to edsl.allom data
+edsl.allom2 <- left_join(edsl.allom, reg_vars, by = "genus_species")
+
+#make a tidy figure with the new df
+figure4 <- ggplot(edsl.allom2, aes(x = sl, y = eyemean)) +
+  geom_point(color = "#bdbebf", size = 2, alpha = 0.3) +
+  scale_color_manual(values = cols.sp, name = "Species") +
+  scale_linetype_manual(values = lty.ssi, name = "Sexual selection index") +
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank()) +
+  geom_segment(aes(x = min, xend = max, y = 10^(log10(min)*slope + elevation), yend = 10^(log10(max)*slope + elevation), color = species_text, lty = ssi), size = 1) +
+  scale_x_log10(name = "Body length (mm)") + #makes x axis log scale and named
+  scale_y_log10(name = "Eye diameter (mm)") + #makes y axis log scale and named
+  theme_classic() +
+  theme(text = element_text(size = 14)) +
+  theme(legend.text = element_text(face = "italic", size = 12),
+        legend.position = "right")
+
+#faceted figure 4 for supplement
+sma_species_supp <- ggplot(edsl.allom2, aes(x = sl, y = eyemean)) +
+  geom_point(color = "#bdbebf", size = 3, alpha = 0.5) +
+  scale_linetype_manual(values = lty.ssi, name = "Sexual selection index") +
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank()) +
+  geom_segment(aes(x = min, xend = max, y = 10^(log10(min)*slope + elevation), yend = 10^(log10(max)*slope + elevation), lty = ssi), size = 1) +
+  scale_x_log10(name = "Body length (mm)") + #makes x axis log scale and named
+  scale_y_log10(name = "Eye diameter (mm)") + #makes y axis log scale and named
+  theme_classic() +
+  facet_wrap(~species_text, nrow = 4) +
+  theme(legend.position = "bottom", legend.text = element_text(size = 16), text = element_text(size = 16)) +
+  theme(strip.text = element_text(face = "italic"))
+
+#interactive plot
+ggplotly(figure4)
+
+#save for ms
+#pdf("/Users/sarah31821/Documents/projects/manuscripts/pgls_ms/figs/static_allom_7.5.23.pdf", width=12, height=6)
+#plot(figure4)
+#dev.off()
+
+#save for manuscript
+pdf("/Users/sarah31821/Documents/projects/manuscripts/pgls_ms/figs/sma_supp_7.6.23.pdf", width=9, height=12)
+plot(sma_species_supp)
+dev.off()
+```
